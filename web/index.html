@@ -20,20 +20,23 @@
 </div>
 
 <header>
-  <div class="brand">Vehicle Dynamics Calculator</div>
-  <nav id="nav">
-    <div class="group"><span class="glabel">Data</span>
-      <button data-view="car-data">Car</button><button data-view="circuit-data">Circuit</button></div>
-    <div class="group"><span class="glabel">Results</span>
-      <button data-view="car-res">Car</button><button data-view="perf-res">Performance</button><button data-view="circuit-res">Circuit</button></div>
-  </nav>
-  <div class="tools">
-    <aside id="env" class="env closed">
-      <button id="env-toggle" class="link">Environment ▸</button>
-      <div id="env-body"></div>
-    </aside>
-    <button id="btn-ref" title="Keep the current results as a reference. Later results are shown with their difference.">Fix reference</button>
-    <span id="ref-state" class="small muted"></span>
+  <div class="brandbox"><div class="brand">Vehicle Dynamics Calculator</div><div id="here"></div></div>
+  <button id="menu-btn" aria-label="Menu" aria-expanded="false" aria-controls="nav"><i></i><i></i></button>
+  <div id="menu">
+    <nav id="nav">
+      <div class="group"><span class="glabel">Data</span>
+        <button data-view="car-data">Car</button><button data-view="circuit-data">Circuit</button></div>
+      <div class="group"><span class="glabel">Results</span>
+        <button data-view="car-res">Car</button><button data-view="perf-res">Performance</button><button data-view="circuit-res">Circuit</button></div>
+    </nav>
+    <div class="tools">
+      <aside id="env" class="env closed">
+        <button id="env-toggle" class="link">Environment ▸</button>
+        <div id="env-body"></div>
+      </aside>
+      <button id="btn-ref" title="Keep the current results as a reference. Later results are shown with their difference.">Fix reference</button>
+      <span id="ref-state" class="small muted"></span>
+    </div>
   </div>
 </header>
 

@@ -171,11 +171,21 @@ function renderView(view) {
   }
 }
 
+// Narrow screens: the menu is a full-screen layer opened by the button in the header.
+function closeMenu() {
+  document.querySelector('header').classList.remove('menu-open'); document.body.classList.remove('menu-lock');
+  $('menu-btn').setAttribute('aria-expanded', 'false');
+}
+function updateHere() {
+  const b = document.querySelector('nav button.active');
+  $('here').textContent = b ? b.closest('.group').querySelector('.glabel').textContent + ' · ' + b.textContent : '';
+}
 async function go(view) {
   S.view = view;
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   document.querySelectorAll('.view').forEach(s => { s.hidden = s.id !== 'view-' + view; });
   window.scrollTo(0, 0);
+  closeMenu(); updateHere();
   if (view.endsWith('-res')) await ensureResults();
   if (S.view === view) renderView(view);
 }
@@ -264,13 +274,22 @@ function wire() {
     S.circuit.start = S.mapPick(e.clientX - r.left, e.clientY - r.top);
     await refreshCircuit(); markDirty();
   });
-  $('btn-ref').addEventListener('click', toggleReference);
+  $('btn-ref').addEventListener('click', () => { closeMenu(); toggleReference(); });
+  $('menu-btn').addEventListener('click', () => {
+    const open = document.querySelector('header').classList.toggle('menu-open');
+    document.body.classList.toggle('menu-lock', open); $('menu-btn').setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('click', e => {
+    if (document.querySelector('header').classList.contains('menu-open') && !$('menu').contains(e.target) && !$('menu-btn').contains(e.target)) closeMenu();
+  });
+  window.matchMedia('(max-width:1420px)').addEventListener('change', e => { if (!e.matches) closeMenu(); });
   $('btn-whatif').addEventListener('click', runWhatIf);
   $('map-color').addEventListener('change', () => renderView('circuit-res'));
   $('gg-speed').addEventListener('input', e => { S.ggIdx = +e.target.value; drawGG(); });
   document.addEventListener('click', e => { if (!$('env').contains(e.target) && !$('env').classList.contains('closed')) $('env-toggle').click(); });
   $('env-toggle').addEventListener('click', async () => {
     const c = $('env').classList.toggle('closed'); $('env-toggle').textContent = c ? 'Environment ▸' : 'Environment ▾';
+    if (c) closeMenu();
     // Leaving the panel after changing a value: recalculate the page that is showing.
     if (c && envChanged) { envChanged = false; if (S.view.endsWith('-res')) { await ensureResults(); renderView(S.view); } }
   });
