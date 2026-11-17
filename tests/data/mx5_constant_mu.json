@@ -1,0 +1,80 @@
+{
+  "format_version": 1,
+  "name": "Mazda MX-5 ND (approximate data)",
+  "general": {
+    "mass_kg": 1138.0,
+    "front_weight_fraction": 0.53,
+    "cg_height_m": 0.46,
+    "wheelbase_m": 2.309,
+    "front_track_m": 1.496,
+    "rear_track_m": 1.506,
+    "drive": "RWD",
+    "awd_front_torque_fraction": 0.5,
+    "brake_front_fraction": 0.75,
+    "lltd_front": null
+  },
+  "powertrain": {
+    "curve_measured_at": "wheel_inertial",
+    "torque_curve": {
+      "rpm": [
+        2750,
+        3000,
+        3500,
+        4000,
+        4500,
+        4830,
+        5500,
+        6000,
+        6631,
+        7000,
+        7221
+      ],
+      "torque_nm": [
+        157,
+        163,
+        180,
+        192,
+        200,
+        202.8,
+        192,
+        185,
+        180.9,
+        173,
+        165
+      ]
+    },
+    "gear_ratios": [
+      5.087,
+      2.991,
+      2.035,
+      1.594,
+      1.286,
+      1.0
+    ],
+    "final_drive": 2.866,
+    "drivetrain_efficiency": 0.93,
+    "engine_inertia_kgm2": 0.17,
+    "wheels_inertia_kgm2": 3.0,
+    "shift_time_s": 0.35,
+    "rev_limit_rpm": null
+  },
+  "tires": {
+    "wheel_radius_m": 0.308,
+    "rolling_coefficient": 0.012,
+    "mode": "constant",
+    "front": {
+      "mu_x": 1.02,
+      "mu_y": 0.89
+    },
+    "rear": {
+      "mu_x": 1.02,
+      "mu_y": 0.89
+    }
+  },
+  "aero": {
+    "cd": 0.38,
+    "cl": 0.0,
+    "frontal_area_m2": 1.79,
+    "front_fraction": null
+  }
+}

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vehicle Dynamics Calculator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="start">
+  <div class="st-top"><div class="brand">Vehicle Dynamics Calculator</div></div>
+  <div class="st-mid">
+    <h1>Car.<br>Circuit.<br>Lap time.</h1>
+    <div class="st-row">
+      <p class="lead">Enter the data of a car and a circuit and get its acceleration, braking, top speed, g-g diagram, cornering and lap time.</p>
+      <div class="st-go"><span class="small muted" id="start-note">The first load downloads about 35 MB.</span><button id="start-btn" disabled>Loading the calculation engine…</button></div>
+    </div>
+  </div>
+  <p class="st-fine"><b>About the model.</b> The car is a point mass with longitudinal and lateral load transfer; suspension dynamics are not modelled. The driver is perfect: the car always uses the grip available, and no more. Each axle carries one type of tyre, with a friction coefficient that may depend on the load. Air density and gravity are constant, and tyre temperature, wear and fuel burn are left out. The circuit is a closed line with height and banking, on a smooth road. The results are estimates meant to compare cars and set-ups, not a substitute for measuring them on track. The calculation runs in your browser and no data leaves it.</p>
+</div>
+
+<header>
+  <div class="brand">Vehicle Dynamics Calculator</div>
+  <nav id="nav">
+    <div class="group"><span class="glabel">Data</span>
+      <button data-view="car-data">Car</button><button data-view="circuit-data">Circuit</button></div>
+    <div class="group"><span class="glabel">Results</span>
+      <button data-view="car-res">Car</button><button data-view="perf-res">Performance</button><button data-view="circuit-res">Circuit</button></div>
+  </nav>
+  <div class="tools">
+    <aside id="env" class="env closed">
+      <button id="env-toggle" class="link">Environment ▸</button>
+      <div id="env-body"></div>
+    </aside>
+    <button id="btn-ref" title="Keep the current results as a reference. Later results are shown with their difference.">Fix reference</button>
+    <span id="ref-state" class="small muted"></span>
+  </div>
+</header>
+
+<div id="busy" hidden><span class="spinner"></span><span id="busy-text">Calculating…</span></div>
+
+<main>
+  <!-- ============ DATA: CAR ============ -->
+  <section id="view-car-data" class="view" hidden>
+    <div class="bar">
+      <div class="reftag" id="ref-car-tag"></div>
+      <div class="actions">
+        <button id="btn-load-car">Load car…</button>
+        <button id="btn-save-car">Save car</button>
+        <input type="file" id="file-car" accept=".json,application/json" hidden>
+      </div>
+    </div>
+    <div id="issues-car" class="issues"></div>
+    <div id="form-car" class="form-grid"></div>
+    <div class="card curve-card">
+      <div class="bar"><h3>Torque curve</h3>
+        <div class="actions"><button id="btn-curve">Import CSV…</button><input type="file" id="file-curve" accept=".csv,.txt,text/csv,text/plain" hidden></div></div>
+      <p class="small muted" id="curve-info"></p>
+      <div id="curve-msg" class="issues"></div>
+      <div class="cc"><div class="ct">Torque <span class="u">(N·m)</span></div><div id="ch-curve" class="chart short"></div></div>
+    </div>
+  </section>
+
+  <!-- ============ DATA: CIRCUIT ============ -->
+  <section id="view-circuit-data" class="view" hidden>
+    <div class="bar">
+      <div class="actions">
+        <button id="btn-load-circuit">Import CSV…</button>
+        <input type="file" id="file-circuit" accept=".csv,.txt,text/csv,text/plain" hidden>
+        <button id="btn-reverse">Reverse direction</button>
+      </div>
+    </div>
+    <div id="issues-circuit" class="issues"></div>
+    <div class="card">
+      <p class="small muted">File columns: <code>x_m, y_m</code> and optionally <code>z_m, bank_deg</code>. The first point is the finish line.
+        Click on the map to move the finish line. Positive bank tilts the road to the left of the direction of travel.</p>
+      <p id="circuit-info" class="small"></p>
+      <div class="pnl"><canvas id="map-data" class="map"></canvas></div>
+    </div>
+  </section>
+
+  <!-- ============ RESULTS: CAR ============ -->
+  <section id="view-car-res" class="view" hidden>
+    <div class="msg" id="msg-car-res"></div>
+    <div id="body-car-res">
+      <div class="two">
+        <div class="cc"><div id="drawing"></div></div>
+        <div>
+          <div id="fig-engine"></div>
+          <div class="cc"><div class="ct">Torque <span class="u">(N·m)</span></div><div class="ct r">Power <span class="u">(kW)</span></div><div id="ch-engine" class="chart"></div></div>
+        </div>
+      </div>
+      <div class="two">
+        <div class="cc"><div class="ct">Engine speed <span class="u">(rpm)</span></div><div id="ch-gears" class="chart"></div></div>
+        <div class="cc"><div class="ct">Friction coefficient</div><div id="ch-tyres" class="chart"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RESULTS: PERFORMANCE ============ -->
+  <section id="view-perf-res" class="view" hidden>
+    <div class="msg" id="msg-perf-res"></div>
+    <div id="body-perf-res">
+      <div class="perf">
+        <div class="perf-l">
+          <div class="cc"><div class="ct">Speed <span class="u">(km/h)</span></div><div id="ch-profile" class="chart"></div></div>
+          <div class="cc"><div class="ct">Force <span class="u">(N)</span></div><div id="ch-forces" class="chart"></div></div>
+        </div>
+        <div class="perf-r">
+          <div class="cc"><div class="ct">g-g <span class="u">(g)</span></div><div id="ch-gg" class="chart gg"></div></div>
+          <div class="ggslide"><input type="range" id="gg-speed" min="0" max="0" step="1" value="0" aria-label="Speed of the g-g diagram"><output id="gg-out"></output></div>
+        </div>
+      </div>
+      <div class="perf-data">
+        <div><div class="lap"><div class="lbl">Acceleration · 0–100 km/h</div><div id="big-acc" class="big"></div></div><div id="fig-acc"></div></div>
+        <div><div class="lap"><div class="lbl">Braking · 100–0 km/h</div><div id="big-brk" class="big"></div></div><div id="fig-brk"></div></div>
+        <div><div class="lap"><div class="lbl">Accelerate and brake · 0–100–0 km/h</div><div id="big-run" class="big"></div></div><div id="fig-run"></div></div>
+      </div>
+      <p id="perf-note" class="perf-note"></p>
+    </div>
+  </section>
+
+  <!-- ============ RESULTS: CIRCUIT ============ -->
+  <section id="view-circuit-res" class="view" hidden>
+    <div class="msg" id="msg-circuit-res"></div>
+    <div id="body-circuit-res">
+      <div class="circ">
+        <div class="circ-left">
+          <div class="pnl map-wrap">
+            
+            <canvas id="map-res" class="map"></canvas></div>
+          <div class="map-sel"><select id="map-color" aria-label="Colour the map by"><option value="speed">Speed</option><option value="lat">Lateral acceleration</option>
+              <option value="long">Longitudinal acceleration</option><option value="gear">Gear</option></select></div>
+          <div class="lap"><div class="lbl">Lap time</div><div id="fig-lap-time" class="big"></div><div id="fig-lap-sub" class="sub"></div></div>
+          <div id="fig-lap"></div>
+          <div class="actions"><button id="btn-whatif" class="pill" title="Change each datum by ±5 % and see how much the lap time changes.">What if</button></div>
+        </div>
+        <div class="circ-right" id="circ-right">
+          <div class="pnl cc"><div class="ct">Speed <span class="u">(km/h)</span></div><div id="ch-lap-speed" class="chart along"></div></div>
+          <div class="pnl cc"><div class="ct">Acceleration <span class="u">(g)</span></div><div id="ch-lap-acc" class="chart along"></div></div>
+          <div class="pnl cc"><div class="ct">Gear</div><div id="ch-lap-gear" class="chart along"></div></div>
+          <div class="pnl cc"><div class="ct">Height <span class="u">(m)</span></div><div id="ch-lap-height" class="chart along"></div></div>
+          <div class="pnl cc" id="card-delta"><div class="ct">Time against the reference <span class="u">(s)</span> · positive is slower</div><div id="ch-lap-delta" class="chart along"></div></div>
+        </div>
+      </div>
+      <div class="pnl" id="card-whatif" hidden><h3>What if: effect on lap time of ±<span id="wi-size">5</span> % in each datum</h3>
+        <div id="wi-bar" class="progress" hidden><div></div></div>
+        <div id="wi-body"></div></div>
+    </div>
+  </section>
+</main>
+
+
+
+<script src="vendor/echarts.min.js"></script>
+<script src="forms.js"></script>
+<script src="charts.js"></script>
+<script src="pages.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
