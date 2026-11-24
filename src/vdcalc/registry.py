@@ -125,7 +125,7 @@ REGISTRY = [
     Param("powertrain.wheels_inertia_kgm2", "Wheels inertia (all four)", "kg*m2", "float", default=3.0, min=0.0,
           max=40.0, typical=(0.5, 8.0),
           help="Sum of the rotating inertias of the four wheels, tyres and brake discs."),
-    Param("powertrain.shift_time_s", "Shift time", "s", "float", default=0.35, min=0.0, max=3.0, typical=(0.02, 1.0),
+    Param("powertrain.shift_time_s", "Shift time", "s", "float", default=0.5, min=0.0, max=3.0, typical=(0.02, 1.0),
           help="Time without drive force during an upshift. Use 0 for a single-speed car."),
     Param("powertrain.rev_limit_rpm", "Rev limit (optional)", "rpm", "float", optional=True, min=500, max=30000,
           typical=(2000, 20000),
