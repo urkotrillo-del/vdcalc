@@ -310,7 +310,10 @@ function lapAccChart(c) {
 function lapGearChart(c) {
   const o = base('Distance (m)', 'Gear', null);
   o.yAxis = { type: 'value', name: 'Gear', minInterval: 1, min: 0, nameTextStyle: { align: 'left' } };
-  o.series = [ser('Gear', c.position_m, c.gear, { color: COLORS[2], step: 'end', width: 2 })];
+  // Off the throttle (braking, holding the corner speed) there is no gear: it is drawn in grey along the bottom.
+  const off = c.gear.map(g => (g === null ? 0.35 : null));
+  o.series = [ser('Gear', c.position_m, c.gear, { color: COLORS[2], step: 'end', width: 2 }),
+              ser('No gear (off the throttle)', c.position_m, off, { color: '#6b6b6b', step: 'end', width: 3 })];
   return o;
 }
 

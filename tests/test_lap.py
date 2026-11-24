@@ -152,12 +152,50 @@ def test_other_layouts_and_tyre_models_give_a_sensible_lap(env, changes):
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_driver_downshifts_while_braking_and_never_upshifts(car, env):
+def test_there_is_no_gear_where_the_car_is_braking_and_there_is_one_where_it_accelerates(car, env):
     lap = solve_lap(car, env, load_track(EXAMPLE, ds=2.0))
     g = lap.gear.astype(int)
-    braking = (lap.long_accel[:-1] < -0.5 * 9.81) & (lap.long_accel[1:] < -0.5 * 9.81)
-    assert braking.sum() > 100
-    assert np.all(np.diff(g)[braking] <= 0) and np.any(np.diff(g)[braking] < 0)
+    braking = lap.long_accel < -0.5 * 9.81                             # (the acceleration is a central difference: the first braking node still drives)
+    accelerating = lap.long_accel > 0.05 * 9.81
+    assert braking.sum() > 100 and accelerating.sum() > 100
+    assert np.all(g[braking] == -1) and np.all(g[accelerating] >= 0)
+    assert g.max() >= 3                                                        # it climbs through the gears on the straights
+
+
+def test_under_power_the_car_only_upshifts(car, env):
+    lap = solve_lap(car, env, load_track(EXAMPLE, ds=2.0))
+    g, v = lap.gear.astype(int), lap.speed
+    pairs = (g[:-1] >= 0) & (g[1:] >= 0) & (v[1:] > v[:-1] + 1e-6)
+    assert pairs.sum() > 300 and np.all(np.diff(g)[pairs] >= 0)
+
+
+def test_a_corner_that_opens_slowly_has_a_gear_all_the_way_up(car, env):
+    """On an ellipse the speed limit rises slowly along the sides: the car follows it, so it has to be in a gear."""
+    a = np.linspace(0, 2 * np.pi, 160, endpoint=False)
+    lap = solve_lap(car, env, build_track(400.0 * np.cos(a), 90.0 * np.sin(a), ds=2.0))
+    g, v = lap.gear.astype(int), lap.speed
+    rising = np.zeros(len(v), dtype=bool)
+    rising[:-1] = v[1:] > v[:-1] + 1e-6
+    assert rising.sum() > 100 and np.all(g[rising] >= 0)
+    assert np.all(v <= lap.limit + 1e-6)
+    shifts = np.flatnonzero(rising[:-1] & rising[1:] & (np.diff(g) > 0))
+    assert len(shifts) >= 1                                                     # it also upshifts on the way up
+
+
+def test_the_secant_gives_the_same_lap_as_the_bisection(car, env):
+    """The braking speed is found with the secant; the bisection (slow, cannot fail) is the control."""
+    for track in (load_track(EXAMPLE, ds=2.0), build_track(*stadium_points(400.0, 60.0), ds=2.0)):
+        fast = solve_lap(car, env, track)
+        slow = solve_lap(car, env, track, backward_method="bisection")
+        assert np.max(np.abs(fast.speed - slow.speed)) < 1e-6
+        assert fast.lap_time == pytest.approx(slow.lap_time, abs=1e-6)
+
+
+def test_the_lap_time_error_falls_fast_with_the_step(car, env):
+    """Second order: with the same smoothing of the curvature the lap time barely moves between 2 m and 0.4 m."""
+    t2 = solve_lap(car, env, load_track(EXAMPLE, ds=2.0, smooth_m=10.0)).lap_time
+    t04 = solve_lap(car, env, load_track(EXAMPLE, ds=0.4, smooth_m=10.0)).lap_time
+    assert abs(t2 - t04) < 0.04
 
 
 def test_a_costlier_shift_never_makes_the_lap_faster_and_gears_are_usable(env):
@@ -183,4 +221,4 @@ def test_the_chosen_gear_can_be_used_at_the_speed_of_the_car(car, env):
 def test_gear_choice_has_no_effect_on_a_single_speed_car(env):
     one = build({"powertrain.gear_ratios": [3.0]})
     lap = solve_lap(one, env, load_track(EXAMPLE, ds=2.0))
-    assert np.all(lap.gear == 0)
+    assert np.all(lap.gear[lap.gear >= 0] == 0) and np.any(lap.gear == 0)

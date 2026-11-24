@@ -5,24 +5,31 @@ Steps:
   2. Backward pass: the fastest the car can be at a point and still brake in time for the next one. The cap of
      the profile is the minimum of the two.
   3. Forward pass: the fastest way of driving to the cap, accelerating at the limit of the car (engine with gears,
-     rev limit and shift time; tyres with traction limit and friction ellipse). The gears are chosen by dynamic
-     programming over (point, gear) to give the least lap time, not the most acceleration at each instant.
-     Downshifts are free, upshifts cost the shift time. Off the throttle (braking, holding the cornering speed)
-     the driver downshifts on the way down and enters the corner in the gear that drives out of it.
+     rev limit and shift time; tyres with traction limit and friction ellipse). It works one ACCELERATION SEGMENT at a
+     time: where the cap rises, the car starts the segment in the gear that accelerates best or in one of the next
+     ones, upshifts at the rev limit (constant speed during the shift) and the start gear that gives the least time at
+     the end of the segment is kept. Where the car is held by the cap (braking, or holding the cornering speed) it is
+     off the throttle and no gear is shown.
 The profile starts at the slowest point of the circuit, where the speed is the limit by definition, so the lap
 closes on itself.
+
+Every step between two points uses the average of the acceleration at its two ends (second order: the error of the
+lap time falls with the square of the spacing, not with the spacing itself), and the curvature of a step is the average
+of its two ends.
 
 Where the lateral limit is nearly used, the friction ellipse leaves little longitudinal force, so the car sheds
 a little speed to pay for drag and rolling resistance: the same trade-off a real car faces at the limit.
 """
+import math
 from dataclasses import dataclass
 
 import numpy as np
 
 from .circuit import Track
 from .lateral import corner_speed, lateral_usage, remaining_fraction
-from .limits import accelerations, braking_deceleration
+from .limits import acceleration, accelerations, braking_deceleration
 from .loads import Conditions, load_terms
+from .powertrain import rev_limit, total_ratio
 from .straightline import top_speed
 
 SPEED_CAP_FACTOR = 1.25     # the speed limit on straights is this multiple of the top speed on the flat
@@ -37,201 +44,275 @@ class LapResult:
     lap_time: float             # [s]
     long_accel: np.ndarray      # acceleration along the road [m/s2]
     lat_accel: np.ndarray       # lateral acceleration, signed (positive = turning left) [m/s2]
-    gear: np.ndarray            # gear index (0 = first) at every point
+    gear: np.ndarray            # gear index (0 = first) at every point; -1 where the car is off the throttle (no gear)
     track: Track
     speed_cap: float = float("inf")   # where the limit equals this, there is no cornering limit (straights)
 
 
 def _intervals(track: Track, order: np.ndarray):
-    """Conditions of each interval between consecutive nodes (in the given order).
+    """Conditions of each interval between consecutive nodes (in the given order): the average of the two ends.
 
-    Curvature and bank come from the node with the tighter curvature (the conservative one); slope and vertical
-    curvature are averaged.
+    (Taking the tighter of the two ends instead is a first-order error: it makes every corner slightly slower, by an
+    amount that grows with the spacing.)
     """
     a, b = order[:-1], order[1:]
-    kappa, bank = track.curvature, track.effective_bank
-    use_b = np.abs(kappa[b]) > np.abs(kappa[a])
-    return (np.where(use_b, kappa[b], kappa[a]), np.where(use_b, bank[b], bank[a]),
+    return (0.5 * (track.curvature[a] + track.curvature[b]), 0.5 * (track.effective_bank[a] + track.effective_bank[b]),
             0.5 * (track.slope[a] + track.slope[b]), 0.5 * (track.vertical_curvature[a] + track.vertical_curvature[b]))
 
 
-class _Label:
-    """One way of being at a point of the circuit: in a gear, at a speed, after a time, reached from `parent`."""
-    __slots__ = ("node", "gear", "v", "t", "parent", "coast_nodes", "chosen", "index")
-    pool = []                       # every label of the current search; `parent` is an index into it, not a reference
-                                    # (a long chain of references overflows the stack when freed, in the browser)
-
-    def __init__(self, node, gear, v, t, parent, coast_nodes=0, chosen=False):
-        self.node, self.gear, self.v, self.t, self.coast_nodes = node, gear, v, t, coast_nodes
-        self.parent = -1 if parent is None else parent.index
-        self.index = len(_Label.pool)
-        _Label.pool.append(self)
-        self.chosen = chosen            # gear picked freely here (downshift or off the throttle): must be usable at this speed
+START_GEAR_WINDOW = 2        # an acceleration segment is tried starting in the best gear and in up to this many gears above it
+ROOT_TOLERANCE = 1e-9        # [m/s] accuracy of the braking speed
+RISE_TOLERANCE = 0.02        # [m/s] the cap must fall or rise by more than this to count as falling or rising (ignores wiggles)
 
 
-_CHANGE_TIME = 0.02          # [s] charged to every gear change in the search: a change that gains less than this is not made
-_MAX_LABELS_PER_GEAR = 3     # alternatives kept in each gear at each point (faster and slower-but-earlier ones)
+def _root_increasing(h, lo, hi, h_lo, h_hi, guess, method="secant", tol=ROOT_TOLERANCE):
+    """Root of an increasing function h in [lo, hi] (h(lo) < 0 < h(hi)).
+
+    "bisection": halves the bracket until it is narrower than tol. Slow, and it cannot fail: the reference.
+    "secant": from two points it jumps to where the straight line through them crosses zero. Fast near the root.
+    Every point found also shrinks the bracket, and a step that falls outside the bracket, or a bracket that did not
+    halve in the last two steps, is replaced by a bisection step, so it is never worse than about twice the bisection.
+    """
+    if method == "bisection":
+        while hi - lo > tol:
+            mid = 0.5 * (lo + hi)
+            if h(mid) > 0.0:
+                hi = mid
+            else:
+                lo = mid
+        return 0.5 * (lo + hi)
+    a = min(max(guess, lo), hi)
+    fa = h(a)
+    b, fb = lo, h_lo
+    widths = []
+    for it in range(80):
+        if fa == 0.0:
+            return a
+        if fa > 0.0:
+            hi = a
+        else:
+            lo = a
+        if hi - lo < tol:
+            break
+        widths.append(hi - lo)
+        x = a - fa * (a - b) / (fa - fb) if fa != fb else 0.5 * (lo + hi)
+        if not lo < x < hi or (it >= 2 and widths[-1] > 0.5 * widths[-3]):
+            x = 0.5 * (lo + hi)
+        b, fb = a, fa
+        a, fa = x, h(x)
+        if abs(a - b) < tol:
+            return a
+    return 0.5 * (lo + hi)
 
 
-def _prune(labels):
-    """Keep, in each gear, the labels that are not worse in speed and in time than another one."""
-    by_gear = {}
-    for lab in labels:
-        by_gear.setdefault(lab.gear, []).append(lab)
-    out = []
-    for group in by_gear.values():
-        group.sort(key=lambda x: (-x.v, x.t))
-        best_t = np.inf
-        kept = 0
-        for lab in group:
-            if lab.t < best_t - 1e-12 and kept < _MAX_LABELS_PER_GEAR:
-                out.append(lab)
-                best_t = lab.t
-                kept += 1
-    return out
+def _backward(vehicle, env, limit, k_int, bank_int, slope_int, kv_int, ds, method="secant"):
+    """Fastest speed at each point from which the car can still brake down to the speed of the next point.
+
+    Over one step the car brakes from v to v_next with the average of the braking at both ends:
+        v^2 = v_next^2 + ds * (b(v) + b(v_next)),   b = braking deceleration (it depends on the speed through the
+        aerodynamic load and the share of grip used by the corner).
+    This is solved for v at every point, from the end of the lap backwards. The left side minus the right side
+    increases with v, so there is one root and it lies between v_next and the cornering limit of the point.
+    """
+    n = len(limit)
+    speed = np.empty(n)
+    speed[-1] = limit[-1]
+    for i in range(n - 2, -1, -1):
+        v_next = float(speed[i + 1])
+        cond = Conditions(slope_int[i], kv_int[i])
+        kappa, bank = k_int[i], bank_int[i]
+
+        def decel(v):
+            usage = min(float(lateral_usage(vehicle, env, v, kappa, bank, cond)), 1.0)
+            return float(braking_deceleration(vehicle, env, v, cond, float(remaining_fraction(usage)))[0])
+
+        b_next = decel(v_next)
+
+        def h(v):
+            return v * v - v_next * v_next - ds * (decel(v) + b_next)
+
+        top = float(limit[i])
+        h_top = h(top)
+        if h_top <= 0.0:                                             # it can brake from the limit itself
+            speed[i] = top
+        else:
+            guess = math.sqrt(v_next * v_next + 2.0 * b_next * ds)   # first-order estimate
+            speed[i] = _root_increasing(h, v_next, top, -2.0 * ds * b_next, h_top, guess, method)
+    return speed
 
 
-def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds):
-    """Fastest way to drive the circuit accelerating at the limit of the car, choosing the gear at every point.
+class _Run:
+    """State of the car while driving one acceleration segment: speed, time, gear and the shift in progress."""
+    __slots__ = ("v", "t", "gear", "coast", "next_gear")
 
-    cap: the speed the car cannot exceed at each point (the cornering limit and what it can brake from). Returns the
-    speed, the gear and whether the car is off the throttle (holding the cap) at each point.
+    def __init__(self, v, t, gear, coast=0.0, next_gear=None):
+        self.v, self.t, self.gear, self.coast = v, t, gear, coast
+        self.next_gear = gear if next_gear is None else next_gear     # gear after the shift
 
-    The gears are chosen to give the least time, not the most acceleration at each instant. It is dynamic programming
-    over (point, gear): at every point the car can be in any gear, with the speed and time it would have if it had come
-    there in the best way, and it may
-      - keep accelerating in its gear,
-      - upshift: no drive force for the shift time, so it covers that distance at constant speed,
-      - downshift: free.
-    Off the throttle (braking, or holding the cornering speed) the speed is the cap, whatever the gear, and the gear
-    is free: the car arrives at the next acceleration in the gear that suits it best.
+    def copy(self):
+        return _Run(self.v, self.t, self.gear, self.coast, self.next_gear)
+
+
+def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_window=START_GEAR_WINDOW):
+    """Fastest way to drive the circuit accelerating at the limit of the car, choosing the gear in each acceleration.
+
+    cap: the speed the car cannot exceed at each point (the cornering limit and what it can brake from).
+    Returns the speed, the gear (-1 where the car is held by the cap: braking or holding the cornering speed) and the
+    time of each step.
+
+    The car follows the cap where the cap does not rise. Where it rises, an acceleration segment starts, up to the next
+    minimum of the cap. For every start gear tried, the car drives the segment at the limit of the tyres and the engine:
+      - upshifts when the engine reaches the rev limit (in the middle of a step if that is where it happens),
+      - a shift takes the shift time at constant speed (no drive force),
+      - its speed never exceeds the cap (it follows it when it reaches it).
+    The start gear with the least time at the end of the segment is kept. Downshifts are not needed: a gear that cannot
+    be used at the start speed is not tried, and the cap only ever makes the car slower than its limit.
+    Each step uses the average of the acceleration at its start and at its end (predict, then correct).
     """
     n = len(cap)
     pt = vehicle.powertrain
     n_gears = len(pt.gear_ratios)
     shift_time = pt.shift_time_s
     mass = vehicle.general.mass_kg
+    radius = vehicle.tires.wheel_radius_m
+    v_cut = np.array([rev_limit(vehicle) / 60.0 * 2.0 * math.pi * radius / total_ratio(vehicle, g) for g in range(n_gears)])
     speed = np.empty(n)
-    gear = np.zeros(n, dtype=int)
-    off_throttle = np.zeros(n, dtype=bool)
+    gear = np.full(n, -1)
+    step_time = np.zeros(n - 1)
 
-    _Label.pool = []
-    current = [_Label(0, g, float(cap[0]), 0.0, None) for g in range(n_gears)]
-    off_throttle[0] = True
-    arrivals = {}                                                   # node -> labels that arrive there after a shift
-    for i in range(n - 1):
-        labels = current + arrivals.pop(i, [])
-        # free changes at this point: downshifts (and upshifts too when they cost nothing)
-        for g in range(n_gears):
-            source = [lab for lab in labels if lab.gear > g or (shift_time == 0.0 and lab.gear != g)]
-            labels = labels + [_Label(i, g, lab.v, lab.t + _CHANGE_TIME, lab, 0, True) for lab in source if lab.gear != g]
-        labels = _prune(labels)
-        v = np.array([lab.v for lab in labels])
-        g_idx = np.array([lab.gear for lab in labels])
-        cond = Conditions(slope_int[i], kv_int[i])
-        usage = np.minimum(np.asarray(lateral_usage(vehicle, env, v, k_int[i], bank_int[i], cond), dtype=float), 1.0)
-        fraction = remaining_fraction(usage)
-        a_all, _ = accelerations(vehicle, env, v, cond, False, fraction)
-        a = np.atleast_2d(a_all)[g_idx, np.arange(len(labels))]
-        t_terms = load_terms(vehicle, env, v, cond)
-        a_coast = -np.asarray(t_terms.drag + t_terms.rolling + t_terms.grade, dtype=float) / mass
+    def accel(v, g, k, cond):
+        usage = min(float(lateral_usage(vehicle, env, v, k_int[k], bank_int[k], cond)), 1.0)
+        a = float(acceleration(vehicle, env, v, g, cond, False, float(remaining_fraction(usage)))[0])
+        if math.isnan(a) and g == n_gears - 1:                        # beyond the rev limit in the last gear: no drive
+            t = load_terms(vehicle, env, v, cond)
+            a = -float(t.drag + t.rolling + t.grade) / mass
+        return a
 
-        new, clamped = [], []
-        for k, lab in enumerate(labels):
-            g = lab.gear
-            ak = a[k]
-            if lab.chosen and np.isnan(ak) and g != n_gears - 1:      # a gear the engine cannot use at this speed
+    def advance(run, k):
+        """Drive the step k -> k+1 from the state `run`; returns the new state."""
+        v, t, g, coast, g_after = run.v, run.t, run.gear, run.coast, run.next_gear
+        cap_next = cap[k + 1]
+        cond = Conditions(slope_int[k], kv_int[k])
+        left = ds                                                   # distance still to drive in this step
+        if cap_next < v - 1e-9:                                     # the cap pulls the speed down: braking, gear is free
+            return _Run(cap_next, t + 2.0 * ds / (v + cap_next), g_after if coast > 0.0 else g)
+        for _ in range(8):
+            if coast > 0.0:                                         # shifting: constant speed
+                d = min(coast, left)
+                t, left, coast = t + d / v, left - d, coast - d
+                if coast <= 1e-12:
+                    coast, g = 0.0, g_after
+                if left <= 1e-12:
+                    return _Run(v, t, g, coast, g_after)
+            if g < n_gears - 1 and v >= v_cut[g] * (1.0 - 1e-12):   # at the rev limit: upshift
+                g_after = g + 1
+                if shift_time > 0.0:
+                    coast = v * shift_time
+                else:
+                    g = g_after
                 continue
-            if np.isnan(ak):                                         # beyond the rev limit in this gear
-                if g != n_gears - 1:
-                    ak = None
+            a0 = accel(v, g, k, cond)
+            if g < n_gears - 1 and math.isnan(a0):
+                g_after = g + 1
+                if shift_time > 0.0:
+                    coast = v * shift_time
                 else:
-                    ak = float(np.atleast_1d(a_coast)[k] if np.ndim(a_coast) else a_coast)
-            if ak is not None:
-                v_next = float(np.sqrt(max(lab.v**2 + 2.0 * ak * ds, 0.0)))
-                t_next = lab.t + 2.0 * ds / max(lab.v + v_next, 1e-3)
-                if v_next > cap[i + 1]:
-                    clamped.append(_Label(i + 1, g, float(cap[i + 1]), t_next, lab))
+                    g = g_after
+                continue
+            v_pred = math.sqrt(max(v * v + 2.0 * a0 * left, 0.0))
+            if g < n_gears - 1 and v_pred >= v_cut[g]:              # the rev limit falls inside this step
+                v_c = v_cut[g] * (1.0 - 1e-9)
+                x = min((v_c * v_c - v * v) / max(a0 + accel(v_c, g, k, cond), 1e-9), left)
+                t, left, v = t + 2.0 * x / (v + v_c), left - x, v_c
+                g_after = g + 1
+                if shift_time > 0.0:
+                    coast = v * shift_time
                 else:
-                    new.append(_Label(i + 1, g, v_next, t_next, lab))
-            if g < n_gears - 1 and shift_time > 0.0 and lab.v > 1e-3:   # upshift: coast for the shift time
-                m = max(int(np.ceil(lab.v * shift_time / ds - 1e-9)), 1)
-                j = i + m
-                if j < n - 1 and np.all(cap[i + 1:j + 1] >= lab.v):
-                    arrivals.setdefault(j, []).append(_Label(j, g + 1, lab.v, lab.t + m * ds / lab.v + _CHANGE_TIME, lab, m))
-        if clamped:                                                  # off the throttle: the speed is the cap in any gear
-            c = min(clamped, key=lambda x: x.t)
-            current = [_Label(i + 1, g, c.v, c.t + (_CHANGE_TIME if g != c.gear else 0.0), c, 0, g != c.gear) for g in range(n_gears)]
-            off_throttle[i + 1] = True
-        else:
-            current = new
-            if not current:                                          # nothing can drive: take the slowest way out
-                current = [_Label(i + 1, n_gears - 1, float(cap[i + 1]), min(lab.t for lab in labels), labels[0])]
+                    g = g_after
+                if left <= 1e-12:
+                    return _Run(v, t, g, coast, g_after)
+                continue
+            a1 = accel(v_pred, g, k, cond)
+            if g < n_gears - 1 and math.isnan(a1):
+                a1 = a0
+            v_end = math.sqrt(max(v * v + (a0 + a1) * left, 0.0))
+            if v_end >= cap_next:                                   # reaches the cap: follows it
+                return _Run(cap_next, t + 2.0 * left / (v + cap_next), g, coast, g_after)
+            return _Run(v_end, t + 2.0 * left / (v + v_end), g, coast, g_after)
+        return _Run(v, t + left / v, g, coast, g_after)             # (not reached with real data) drive the rest at constant speed
 
-    final = min(current + arrivals.pop(n - 1, []), key=lambda x: x.t)
-    chain = []
-    lab = final
-    while lab is not None:
-        chain.append(lab)
-        lab = _Label.pool[lab.parent] if lab.parent >= 0 else None
-    chain.reverse()
-    pool = _Label.pool
-    for lab in chain:
-        if lab.coast_nodes:                                          # shifting: constant speed in the old gear
-            for node in range(lab.node - lab.coast_nodes, lab.node):
-                speed[node], gear[node] = lab.v, pool[lab.parent].gear
-        speed[lab.node], gear[lab.node] = lab.v, lab.gear
-    _Label.pool = []
-    return speed, gear, off_throttle
+    def segment_end(i):
+        """Node of the next minimum of the cap after the rise that starts at i. Wiggles smaller than RISE_TOLERANCE do not count."""
+        k, top = i, cap[i]
+        while k + 1 < n and cap[k + 1] > top - RISE_TOLERANCE:      # still rising (or flat)
+            top = max(top, cap[k + 1])
+            k += 1
+        if k + 1 >= n:
+            return n - 1
+        low, node = cap[k + 1], k + 1
+        k += 1
+        while k + 1 < n and cap[k + 1] < low + RISE_TOLERANCE:      # falling (or flat) until it rises again
+            if cap[k + 1] < low:
+                low, node = cap[k + 1], k + 1
+            k += 1
+        return node if k + 1 < n else n - 1
 
-
-def _display_gears(vehicle, env, k_int, slope_int, kv_int, profile, gears, off_throttle):
-    """Gear at every point as the driver would show it. With the throttle on it is the gear chosen. Off the throttle
-    (braking, holding the cornering speed) the driver downshifts on the way down: the gear follows the best one for
-    the actual speed, never below the gear in which the car leaves the corner (unless that would over-rev) and never above the previous point."""
-    out = gears.copy()
-    n = len(gears)
+    speed[0] = cap[0]
+    carried = None                    # state of a car that is still accelerating when the segment ends (cap not reached)
     i = 0
     while i < n - 1:
-        if not off_throttle[i]:
+        if carried is None and cap[i + 1] <= speed[i] + 1e-9:       # the cap does not rise: follow it
+            speed[i + 1] = cap[i + 1]
+            step_time[i] = 2.0 * ds / (speed[i] + speed[i + 1])
             i += 1
             continue
-        j = i
-        while j + 1 < n - 1 and off_throttle[j + 1]:
-            j += 1
-        exit_gear = int(gears[j])                                    # the gear that drives out of this stretch
-        previous = int(out[i - 1]) if i > 0 else exit_gear
-        for k in range(i, j + 1):
-            a_all, _ = accelerations(vehicle, env, float(profile[k]), Conditions(slope_int[k], kv_int[k]), False, 1.0)
-            valid = np.where(np.isnan(a_all), -np.inf, a_all)
-            best = int(np.argmax(valid)) if valid.max() > -np.inf else previous
-            lowest = int(np.argmax(~np.isnan(a_all))) if not np.all(np.isnan(a_all)) else 0   # lower gears over-rev
-            out[k] = max(lowest, exit_gear, min(previous, best))
-            previous = int(out[k])
-        out[j] = exit_gear
-        i = j + 1
-    out[-1] = out[-2]
-    return out
+        end = segment_end(i)
+        if carried is not None:
+            starts = [carried]
+        else:
+            v0 = float(speed[i])
+            cond = Conditions(slope_int[i], kv_int[i])
+            usage = min(float(lateral_usage(vehicle, env, v0, k_int[i], bank_int[i], cond)), 1.0)
+            a_all = np.asarray(accelerations(vehicle, env, v0, cond, False, float(remaining_fraction(usage)))[0], dtype=float).reshape(n_gears)
+            usable = np.flatnonzero(~np.isnan(a_all))
+            best = int(usable[np.argmax(a_all[usable])]) if len(usable) else n_gears - 1
+            tried = [g for g in range(best, min(best + start_window, n_gears - 1) + 1) if g in usable] or [n_gears - 1]
+            starts = [_Run(v0, 0.0, g) for g in tried]
+        results = []
+        for run in starts:
+            run = run.copy()
+            v_log, g_log, t_log = [run.v], [], [0.0]
+            for k in range(i, end):
+                g_log.append(run.gear)
+                run = advance(run, k)
+                v_log.append(run.v)
+                t_log.append(run.t)
+            results.append((run, v_log, g_log, t_log))
+        if len(results) > 1:                                        # same end point: least time; one that is slower there pays the time to catch up
+            v_best = max(r[0].v for r in results)
+            a_end = max(accel(v_best, results[0][0].gear, end - 1, Conditions(slope_int[end - 1], kv_int[end - 1])), 0.5)
+            cost = [r[0].t + (v_best - r[0].v) / a_end for r in results]
+        else:
+            cost = [0.0]
+        run, v_log, g_log, t_log = results[int(np.argmin(cost))]
+        for j, k in enumerate(range(i, end)):
+            speed[k + 1] = v_log[j + 1]
+            step_time[k] = t_log[j + 1] - t_log[j]
+            gear[k] = g_log[j]
+        carried = _Run(run.v, 0.0, run.gear, run.coast, run.next_gear) if run.v < cap[end] - 1e-6 else None
+        i = end
+    for k in range(n - 1):                                          # held by the cap and not accelerating: no gear
+        if abs(speed[k] - cap[k]) < 1e-6 and cap[k + 1] <= cap[k] + 1e-9:
+            gear[k] = -1
+    gear[-1] = gear[-2]
+    return speed, gear, step_time
 
 
-def _backward(vehicle, env, limit, k_int, bank_int, slope_int, kv_int, ds):
-    n = len(limit)
-    speed = np.empty(n)
-    speed[-1] = limit[-1]
-    for i in range(n - 2, -1, -1):
-        v_next = speed[i + 1]
-        v = v_next
-        cond = Conditions(slope_int[i], kv_int[i])
-        for _ in range(2):                                           # the braking limit depends on the speed it starts at
-            fraction = float(remaining_fraction(min(float(lateral_usage(vehicle, env, v, k_int[i], bank_int[i], cond)), 1.0)))
-            a, _ = braking_deceleration(vehicle, env, v, cond, fraction)
-            v = float(np.sqrt(max(v_next * v_next + 2.0 * float(a) * ds, 0.0)))
-        speed[i] = min(v, limit[i])
-    return speed
+def solve_lap(vehicle, env, track: Track, backward_method="secant") -> LapResult:
+    """Speed profile and lap time of the vehicle on the circuit.
 
-
-def solve_lap(vehicle, env, track: Track) -> LapResult:
-    """Speed profile and lap time of the vehicle on the circuit."""
+    backward_method: "secant" (default) or "bisection" (slower, the reference the secant is checked against).
+    """
     n = len(track.s)
     ds = track.ds
     cap = SPEED_CAP_FACTOR * top_speed(vehicle, env).speed
@@ -242,19 +323,17 @@ def solve_lap(vehicle, env, track: Track) -> LapResult:
     order = (np.arange(n + 1) + start) % n                           # n + 1 nodes: the last one is the start again
     k_int, bank_int, slope_int, kv_int = _intervals(track, order)
     lim = limit[order]
-    bwd = _backward(vehicle, env, lim, k_int, bank_int, slope_int, kv_int, ds)
+    bwd = _backward(vehicle, env, lim, k_int, bank_int, slope_int, kv_int, ds, backward_method)
     cap_profile = np.minimum(lim, bwd)
-    profile, gears, off_throttle = _forward(vehicle, env, cap_profile, k_int, bank_int, slope_int, kv_int, ds)
-    profile = np.minimum(profile, cap_profile)
+    profile, gears, step_time = _forward(vehicle, env, cap_profile, k_int, bank_int, slope_int, kv_int, ds)
     profile[-1] = profile[0]
-    gears = _display_gears(vehicle, env, k_int, slope_int, kv_int, profile, gears, off_throttle)
 
     speed = np.empty(n)
     gear = np.empty(n, dtype=int)
     speed[order[:-1]] = profile[:-1]
     gear[order[:-1]] = gears[:-1]
-    v_next = np.roll(speed, -1)
-    dt = 2.0 * ds / np.maximum(speed + v_next, 1e-3)
+    dt = np.empty(n)
+    dt[order[:-1]] = step_time
     time = np.concatenate([[0.0], np.cumsum(dt)[:-1]])
     long_accel = (np.roll(speed, -1) ** 2 - np.roll(speed, 1) ** 2) / (4.0 * ds)
     return LapResult(position=track.s, speed=speed, limit=limit, time=time, lap_time=float(dt.sum()),

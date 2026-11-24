@@ -71,7 +71,8 @@ def test_circuit_page_on_the_example_circuit(car, env):
     for key in ("x_m", "y_m", "z_m", "bank_deg", "speed_kmh", "limit_kmh", "long_accel_g", "lat_accel_g", "gear", "time_s"):
         assert len(p[key]) == n
     assert p["summary"]["lap_time_text"].count(":") == 1 and 100 < p["summary"]["lap_time_s"] < 170
-    assert min(p["gear"]) >= 1 and max(p["gear"]) <= 6
+    driven = [g for g in p["gear"] if g is not None]                           # None: off the throttle, no gear
+    assert len(driven) > 0.3 * n and min(driven) >= 1 and max(driven) <= 6
     assert abs(p["start_heading_rad"]) < 0.05                                           # the example starts heading east
     limit = np.array([np.nan if v is None else v for v in p["limit_kmh"]])
     assert np.isnan(limit).sum() > 0.4 * n and np.nanmin(limit) < 100                    # straights have no limit, corners do

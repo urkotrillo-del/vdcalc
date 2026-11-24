@@ -146,7 +146,7 @@ function drawGG() {
 function mapValues(c, mode) {
   if (mode === 'lat') { const v = c.lat_accel_g.map(Math.abs); return { v, unit: 'g', digits: 2 }; }
   if (mode === 'long') return { v: c.long_accel_g, unit: 'g', digits: 2 };
-  if (mode === 'gear') return { v: c.gear, unit: '', digits: 0 };
+  if (mode === 'gear') return { v: c.gear.map(g => (g === null ? 0 : g)), unit: '', digits: 0 };   // 0: off the throttle, no gear
   return { v: c.speed_kmh, unit: 'km/h', digits: 0 };
 }
 

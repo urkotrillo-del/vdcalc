@@ -22,4 +22,9 @@
 ## Discarded
 - Single-screen layout, full g-g-v map, side-by-side two-car comparison, built-in competition circuits.
 
-- Gear selection: DONE, dynamic programming over (point, gear) finds the gear schedule with the least lap time; downshifts while braking. TODO: user-facing info text (quasi-steady-state: no body roll/pitch, a real driver would not make such short shifts); the straight-line `accelerate` still uses a greedy gear with hysteresis.
+- Gear selection: DONE (v2). The lap works by acceleration segments: where the speed limit rises the car starts in the gear that accelerates best, or in one of the next two, upshifts at the rev limit (constant speed during the shift) and the start gear with the least time at the end of the segment is kept. Braking and holding the cornering speed have no gear (grey in the charts). TODO: user-facing info text (quasi-steady-state: no body roll/pitch, a real driver would not make such short shifts); the straight-line `accelerate` still uses a greedy gear with hysteresis.
+- Lap algorithm, next steps (decided, not done):
+  - Shift point: a pre-step that finds the best point to shift when it is not the rev limit (it only matters for cars with a falling torque curve; with the example car the shift at the cut gives the same lap time as the old free choice, to 0.005 s).
+  - Speed during the shift: the car decelerates (drag) instead of keeping a constant speed; the shifting distance is then longer and there is a minimum distance below which shifting is worse than staying at the cut.
+  - A free gear change while holding the cornering speed (plateau of the speed limit inside a rise): today the same gear continues.
+  - The curvature smoothing window changes with the spacing (the width is forced to an odd number of samples: 12, 10, 9 and 8.5 m for 4, 2, 1 and 0.5 m). It moves the lap time by about 0.005 s; make it exactly `smooth_m` with weights.
