@@ -147,6 +147,6 @@ def circuit_page(vehicle, env, track: Track, lap: LapResult = None) -> dict:
         "bank_deg": np.degrees(track.bank), "curvature": track.curvature, "slope_pct": np.tan(track.slope) * 100.0,
         "speed_kmh": lap.speed * 3.6, "limit_kmh": np.where(unlimited, np.nan, lap.limit * 3.6),
         "long_accel_g": lap.long_accel / G0, "lat_accel_g": lap.lat_accel / G0,
-        "gear": [None if g < 0 else int(g) + 1 for g in lap.gear], "time_s": lap.time,
+        "gear": [None if g < 0 else int(g) + 1 for g in lap.gear], "n_gears": len(vehicle.powertrain.gear_ratios), "time_s": lap.time,
         "start_heading_rad": float(math.atan2(track.y[1] - track.y[0], track.x[1] - track.x[0])),
     }

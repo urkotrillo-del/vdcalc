@@ -310,10 +310,8 @@ function lapAccChart(c) {
 function lapGearChart(c) {
   const o = base('Distance (m)', 'Gear', null);
   o.yAxis = { type: 'value', name: 'Gear', minInterval: 1, min: 0, nameTextStyle: { align: 'left' } };
-  // Off the throttle (braking, holding the corner speed) there is no gear: it is drawn in grey along the bottom.
-  const off = c.gear.map(g => (g === null ? 0.35 : null));
-  o.series = [ser('Gear', c.position_m, c.gear, { color: COLORS[2], step: 'end', width: 2 }),
-              ser('No gear (off the throttle)', c.position_m, off, { color: '#6b6b6b', step: 'end', width: 3 })];
+  // Off the throttle (braking, holding the corner speed) there is no gear: the line has a gap there.
+  o.series = [ser('Gear', c.position_m, c.gear, { color: COLORS[2], step: 'end', width: 2 })];
   return o;
 }
 
@@ -341,6 +339,34 @@ function whatifChart(rows) {
 // ---------------------------------------------------------------- circuit map
 function colorAt(t) { return `hsl(${Math.round(215 * (1 - Math.min(Math.max(t, 0), 1)))},85%,58%)`; }     // blue (low), green, yellow, red (high)
 
+// Colour scales of the circuit map. The same value always gives the same colour; only the ends of the scale follow the lap.
+const clamp01 = t => Math.min(Math.max(t, 0), 1);
+const speedColor = t => `hsl(${Math.round(215 * clamp01(t))},85%,58%)`;                // slow red, yellow, green, fast blue
+const mixRgb = (a, b, t) => a.map((x, i) => x + (b[i] - x) * t);
+const hslRgb = (h, s, l) => { const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); }; return [f(0) * 255, f(8) * 255, f(4) * 255]; };
+const LONG_GREY = [204, 204, 204], LONG_RED = hslRgb(355, 1, 0.56), LONG_GREEN = hslRgb(140, 1, 0.5), LONG_TEAL = hslRgb(172, 1, 0.5);
+// Braking: grey to red; acceleration: grey to green to turquoise. Each side reaches full colour at its own maximum of the lap.
+function longitudinalColor(amin, amax) {
+  return a => {
+    if (Math.abs(a) < 0.03) return rgbCss(LONG_GREY);
+    if (a < 0) return rgbCss(mixRgb(LONG_GREY, LONG_RED, Math.pow(Math.min(Math.min(a / amin, 1) / 0.35, 1), 0.6)));
+    const t = Math.min(a / amax, 1);
+    return rgbCss(t < 0.12 ? mixRgb(LONG_GREY, LONG_GREEN, Math.pow(t / 0.12, 0.6)) : mixRgb(LONG_GREEN, LONG_TEAL, (t - 0.12) / 0.88));
+  };
+}
+const rgbCss = c => `rgb(${c.map(Math.round).join(',')})`;
+// One colour per gear, always the same (turbo scale: blue for the lowest, red for the highest). No gear: dark grey.
+const TURBO_6 = ['#4559cb', '#23c3e4', '#61fc6c', '#dde037', '#fa7b1f', '#b71d02'], NO_GEAR_COLOR = '#666666';
+const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+// n gears: the six colours for 6 gears; another number of gears takes n points along the same scale (always the same for a car).
+function gearPalette(n) {
+  if (n === 6) return TURBO_6.slice();
+  return Array.from({ length: n }, (_, k) => {
+    const x = n === 1 ? 0 : 5 * k / (n - 1), i = Math.min(Math.floor(x), 4);
+    return rgbCss(mixRgb(hexRgb(TURBO_6[i]), hexRgb(TURBO_6[i + 1]), x - i));
+  });
+}
+
 // o: {values, vmin, vmax, unit, start, dir (+1/-1), onPoints}. Returns a function that finds the nearest point to a click.
 function drawMap(canvas, xs, ys, o = {}) {
   const W = canvas.clientWidth, H = canvas.clientHeight;
@@ -359,7 +385,7 @@ function drawMap(canvas, xs, ys, o = {}) {
   const span = (o.vmax - o.vmin) || 1;
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n;
-    g.strokeStyle = o.values ? colorAt((o.values[i] - o.vmin) / span) : '#6b6b6b';
+    g.strokeStyle = o.values ? (o.colorFn ? o.colorFn(o.values[i]) : colorAt((o.values[i] - o.vmin) / span)) : '#6b6b6b';
     g.beginPath(); g.moveTo(px(xs[i]), py(ys[i])); g.lineTo(px(xs[j]), py(ys[j])); g.stroke();
   }
   const dir = o.dir || 1;
@@ -376,12 +402,18 @@ function drawMap(canvas, xs, ys, o = {}) {
   g.save(); g.translate(px(xs[s]), py(ys[s])); g.rotate(ang);
   g.strokeStyle = '#f2f2f2'; g.lineWidth = 3; g.beginPath(); g.moveTo(0, -14); g.lineTo(0, 14); g.stroke(); g.restore();
   g.fillStyle = '#b5b5b5'; g.font = '500 11px ' + FONT; if ('letterSpacing' in g) g.letterSpacing = '1px'; g.fillText('FINISH', px(xs[s]) + 10, py(ys[s]) - 12);
-  if (o.values) {                                                      // colour bar
+  if (o.values && o.swatches) {                                        // one swatch per category
+    const sw = 17, gap = 3, bw = o.swatches.length * (sw + gap) - gap, bx = W - bw - 14, by = H - 26;
+    g.font = '500 11px ' + FONT; g.textAlign = 'center';
+    o.swatches.forEach((w, k) => { g.fillStyle = w.color; g.fillRect(bx + k * (sw + gap), by, sw, 8); g.fillStyle = '#8a8a8a'; g.fillText(w.label, bx + k * (sw + gap) + sw / 2, by - 3); });
+    g.textAlign = 'left';
+  } else if (o.values) {                                               // colour bar
     const bw = 120, bx = W - bw - 14, by = H - 26;
-    for (let k = 0; k < bw; k++) { g.fillStyle = colorAt(k / (bw - 1)); g.fillRect(bx + k, by, 1, 8); }
+    for (let k = 0; k < bw; k++) { g.fillStyle = o.colorFn ? o.colorFn(o.vmin + span * k / (bw - 1)) : colorAt(k / (bw - 1)); g.fillRect(bx + k, by, 1, 8); }
     g.fillStyle = '#8a8a8a'; g.font = '500 11px ' + FONT;
     g.textAlign = 'left'; g.fillText(o.vmin.toFixed(o.digits ?? 0), bx, by - 3);
-    g.textAlign = 'right'; g.fillText(o.vmax.toFixed(o.digits ?? 0) + ' ' + (o.unit || ''), bx + bw, by - 3);
+    g.textAlign = 'right'; g.fillText((o.zero && o.vmax > 0 ? '+' : '') + o.vmax.toFixed(o.digits ?? 0) + ' ' + (o.unit || ''), bx + bw, by - 3);
+    if (o.zero && o.vmin < 0 && o.vmax > 0) { g.textAlign = 'center'; g.fillText('0', bx + bw * (0 - o.vmin) / span, by + 19); }   // below the bar
     g.textAlign = 'left';
   }
   if ('letterSpacing' in g) g.letterSpacing = '0px';

@@ -144,10 +144,22 @@ function drawGG() {
 }
 
 function mapValues(c, mode) {
-  if (mode === 'lat') { const v = c.lat_accel_g.map(Math.abs); return { v, unit: 'g', digits: 2 }; }
-  if (mode === 'long') return { v: c.long_accel_g, unit: 'g', digits: 2 };
-  if (mode === 'gear') return { v: c.gear.map(g => (g === null ? 0 : g)), unit: '', digits: 0 };   // 0: off the throttle, no gear
-  return { v: c.speed_kmh, unit: 'km/h', digits: 0 };
+  const ends = a => { const f = a.filter(x => x !== null); return [Math.min(...f), Math.max(...f)]; };
+  if (mode === 'gear') {
+    const n = c.n_gears || Math.max(...c.gear.filter(x => x !== null)), pal = gearPalette(n);
+    return { v: c.gear, vmin: 1, vmax: n, unit: '', digits: 0, fn: g => (g === null ? NO_GEAR_COLOR : pal[Math.min(g, pal.length) - 1]),
+             swatches: pal.map((color, k) => ({ color, label: String(k + 1) })).concat([{ color: NO_GEAR_COLOR, label: '–' }]) };
+  }
+  if (mode === 'long') {
+    const [lo, hi] = ends(c.long_accel_g);
+    return { v: c.long_accel_g, vmin: lo, vmax: hi, unit: 'g', digits: 2, zero: true, fn: longitudinalColor(lo, hi) };
+  }
+  if (mode === 'lat') {
+    const v = c.lat_accel_g.map(Math.abs), [lo, hi] = ends(v);
+    return { v, vmin: lo, vmax: hi, unit: 'g', digits: 2 };                       // the original scale: blue (low) to red (high)
+  }
+  const [lo, hi] = ends(c.speed_kmh), span = (hi - lo) || 1;
+  return { v: c.speed_kmh, vmin: lo, vmax: hi, unit: 'km/h', digits: 0, fn: x => speedColor((x - lo) / span) };
 }
 
 function renderCircuitRes(res, ref) {
@@ -169,7 +181,7 @@ function renderCircuitRes(res, ref) {
     figuresTable(['lap_speed_min_kmh', 'lap_speed_max_kmh', 'lap_speed_avg_kmh', 'lap_max_lateral_g', 'lap_max_braking_g'], kf, rk) +
     (rc && !same ? '<p class="small muted">The reference is on a different circuit: it is not compared here.</p>' : '');
   const m = mapValues(c, document.getElementById('map-color').value);
-  drawMap(document.getElementById('map-res'), c.x_m, c.y_m, { values: m.v, vmin: Math.min(...m.v), vmax: Math.max(...m.v), unit: m.unit, digits: m.digits, start: 0, dir: 1 });
+  drawMap(document.getElementById('map-res'), c.x_m, c.y_m, { values: m.v, vmin: m.vmin, vmax: m.vmax, unit: m.unit, digits: m.digits, colorFn: m.fn, swatches: m.swatches, zero: m.zero, start: 0, dir: 1 });
   const nCh = 5;
   document.getElementById('circ-right').style.setProperty('--n', nCh);
   chart('ch-lap-speed', alignAlong(lapSpeedChart(c, same ? rc : null), c));
