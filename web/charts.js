@@ -344,7 +344,7 @@ const clamp01 = t => Math.min(Math.max(t, 0), 1);
 const speedColor = t => `hsl(${Math.round(215 * clamp01(t))},85%,58%)`;                // slow red, yellow, green, fast blue
 const mixRgb = (a, b, t) => a.map((x, i) => x + (b[i] - x) * t);
 const hslRgb = (h, s, l) => { const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); }; return [f(0) * 255, f(8) * 255, f(4) * 255]; };
-const LONG_GREY = [204, 204, 204], LONG_RED = hslRgb(355, 1, 0.56), LONG_GREEN = hslRgb(140, 1, 0.5), LONG_TEAL = hslRgb(172, 1, 0.5);
+const LONG_GREY = [61, 61, 61], LONG_RED = hslRgb(355, 1, 0.56), LONG_GREEN = hslRgb(140, 1, 0.5), LONG_TEAL = hslRgb(172, 1, 0.5);
 // Braking: grey to red; acceleration: grey to green to turquoise. Each side reaches full colour at its own maximum of the lap.
 function longitudinalColor(amin, amax) {
   return a => {
@@ -376,10 +376,10 @@ function drawMap(canvas, xs, ys, o = {}) {
   const g = canvas.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
-  const n = xs.length, pad = 34;
+  const n = xs.length, pad = 14, padTop = 34;                         // the top has more room: the word FINISH can sit above the line
   const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
-  const sc = Math.min((W - 2 * pad) / Math.max(maxx - minx, 1e-9), (H - 2 * pad) / Math.max(maxy - miny, 1e-9));
-  const ox = (W - sc * (maxx - minx)) / 2, oy = (H - sc * (maxy - miny)) / 2;
+  const sc = Math.min((W - 2 * pad) / Math.max(maxx - minx, 1e-9), (H - pad - padTop) / Math.max(maxy - miny, 1e-9));
+  const ox = (W - sc * (maxx - minx)) / 2, oy = pad + (H - pad - padTop - sc * (maxy - miny)) / 2;
   const px = x => ox + sc * (x - minx), py = y => H - (oy + sc * (y - miny));
   g.lineWidth = 5; g.lineCap = 'round'; g.lineJoin = 'round';
   const span = (o.vmax - o.vmin) || 1;
@@ -389,19 +389,14 @@ function drawMap(canvas, xs, ys, o = {}) {
     g.beginPath(); g.moveTo(px(xs[i]), py(ys[i])); g.lineTo(px(xs[j]), py(ys[j])); g.stroke();
   }
   const dir = o.dir || 1;
-  g.fillStyle = '#f2f2f2';
-  const step = Math.max(Math.floor(n / 14), 1);
-  for (let i = Math.floor(step / 2); i < n; i += step) {
-    const a = i, b = (i + dir + n) % n;
-    const ang = Math.atan2(py(ys[b]) - py(ys[a]), px(xs[b]) - px(xs[a]));
-    g.save(); g.translate(px(xs[a]), py(ys[a])); g.rotate(ang);
-    g.beginPath(); g.moveTo(7, 0); g.lineTo(-5, -5); g.lineTo(-5, 5); g.closePath(); g.fill(); g.restore();
-  }
   const s = o.start || 0, sb = (s + dir + n) % n;
   const ang = Math.atan2(py(ys[sb]) - py(ys[s]), px(xs[sb]) - px(xs[s]));
   g.save(); g.translate(px(xs[s]), py(ys[s])); g.rotate(ang);
   g.strokeStyle = '#f2f2f2'; g.lineWidth = 3; g.beginPath(); g.moveTo(0, -14); g.lineTo(0, 14); g.stroke(); g.restore();
   g.fillStyle = '#b5b5b5'; g.font = '500 11px ' + FONT; if ('letterSpacing' in g) g.letterSpacing = '1px'; g.fillText('FINISH', px(xs[s]) + 10, py(ys[s]) - 12);
+  // The direction of the lap: a hairline pointer coming out of the finish line (one only: it does not cover the colours).
+  g.save(); g.translate(px(xs[s]), py(ys[s])); g.rotate(ang); g.strokeStyle = '#f2f2f2'; g.lineWidth = 1.1; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(0, 14); g.lineTo(18, 14); g.moveTo(13, 9.5); g.lineTo(18, 14); g.lineTo(13, 18.5); g.stroke(); g.restore();
   if (o.values && o.swatches) {                                        // one swatch per category
     const sw = 17, gap = 3, bw = o.swatches.length * (sw + gap) - gap, bx = W - bw - 14, by = H - 26;
     g.font = '500 11px ' + FONT; g.textAlign = 'center';
@@ -417,9 +412,11 @@ function drawMap(canvas, xs, ys, o = {}) {
     g.textAlign = 'left';
   }
   if ('letterSpacing' in g) g.letterSpacing = '0px';
-  return (cx, cy) => {
-    let best = 0, bd = Infinity;
+  const pick = (cx, cy, maxDist = Infinity) => {          // the point of the circuit nearest to (cx, cy), or -1 if it is farther than maxDist
+    let best = -1, bd = maxDist * maxDist;
     for (let i = 0; i < n; i++) { const d = (px(xs[i]) - cx) ** 2 + (py(ys[i]) - cy) ** 2; if (d < bd) { bd = d; best = i; } }
     return best;
   };
+  pick.at = i => [px(xs[i]), py(ys[i])];                   // canvas position of point i
+  return pick;
 }

@@ -147,20 +147,53 @@ function mapValues(c, mode) {
   const ends = a => { const f = a.filter(x => x !== null); return [Math.min(...f), Math.max(...f)]; };
   if (mode === 'gear') {
     const n = c.n_gears || Math.max(...c.gear.filter(x => x !== null)), pal = gearPalette(n);
-    return { v: c.gear, vmin: 1, vmax: n, unit: '', digits: 0, fn: g => (g === null ? NO_GEAR_COLOR : pal[Math.min(g, pal.length) - 1]),
+    return { v: c.gear, vmin: 1, vmax: n, unit: '', digits: 0, fn: g => (g === null ? NO_GEAR_COLOR : pal[Math.min(g, pal.length) - 1]), text: g => (g === null ? 'No gear' : 'Gear ' + g),
              swatches: pal.map((color, k) => ({ color, label: String(k + 1) })).concat([{ color: NO_GEAR_COLOR, label: '–' }]) };
   }
   if (mode === 'long') {
     const [lo, hi] = ends(c.long_accel_g);
-    return { v: c.long_accel_g, vmin: lo, vmax: hi, unit: 'g', digits: 2, zero: true, fn: longitudinalColor(lo, hi) };
+    return { v: c.long_accel_g, vmin: lo, vmax: hi, unit: 'g', digits: 2, zero: true, fn: longitudinalColor(lo, hi), text: a => (a < 0 ? '−' : '+') + Math.abs(a).toFixed(2) + ' g' };
   }
   if (mode === 'lat') {
     const v = c.lat_accel_g.map(Math.abs), [lo, hi] = ends(v);
-    return { v, vmin: lo, vmax: hi, unit: 'g', digits: 2 };                       // the original scale: blue (low) to red (high)
+    return { v, vmin: lo, vmax: hi, unit: 'g', digits: 2, text: a => a.toFixed(2) + ' g' };                       // the original scale: blue (low) to red (high)
   }
   const [lo, hi] = ends(c.speed_kmh), span = (hi - lo) || 1;
-  return { v: c.speed_kmh, vmin: lo, vmax: hi, unit: 'km/h', digits: 0, fn: x => speedColor((x - lo) / span) };
+  return { v: c.speed_kmh, vmin: lo, vmax: hi, unit: 'km/h', digits: 0, fn: x => speedColor((x - lo) / span), text: x => Math.round(x) + ' km/h' };
 }
+
+// Hovering the circuit map: a ring on the nearest point of the track and, beside it, the distance and the value being shown.
+const mapHover = (() => {
+  let pick = null, dist = null, m = null, last = -1;
+  const map = () => document.getElementById('map-res'), over = () => document.getElementById('map-hover');
+  function clear() { const cv = over(); if (cv) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); last = -1; }
+  function show(i, W, H) {
+    const cv = over(), dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const [x, y] = pick.at(i);
+    g.lineWidth = 4; g.strokeStyle = '#000'; g.beginPath(); g.arc(x, y, 6.5, 0, 7); g.stroke();            // black edge: it reads over any colour
+    g.lineWidth = 1.3; g.strokeStyle = '#f2f2f2'; g.beginPath(); g.arc(x, y, 6.5, 0, 7); g.stroke();
+    const d = dist[i], t1 = d >= 1000 ? (d / 1000).toFixed(2) + ' km' : Math.round(d) + ' m', t2 = m.text(m.v[i]);
+    g.font = '500 12px ' + FONT; const w = Math.max(g.measureText(t1).width, g.measureText(t2).width) + 16, h = 40;
+    let bx = x + 14, by = y - h - 10; if (bx + w > W - 4) bx = x - 14 - w; if (by < 4) by = y + 12;
+    g.fillStyle = 'rgba(0,0,0,.78)'; g.fillRect(bx, by, w, h);
+    g.textBaseline = 'alphabetic'; g.fillStyle = '#f2f2f2'; g.fillText(t1, bx + 8, by + 16); g.fillStyle = '#9a9a9a'; g.fillText(t2, bx + 8, by + 32);
+  }
+  function move(e) {
+    if (!pick) return;
+    const cv = map(), r = cv.getBoundingClientRect(), i = pick(e.clientX - r.left, e.clientY - r.top, 26);
+    if (i < 0) { if (last >= 0) clear(); return; }
+    if (i !== last) { last = i; show(i, cv.clientWidth, cv.clientHeight); }
+  }
+  let installed = false;
+  return {
+    set(p, d, mm) {
+      pick = p; dist = d; m = mm; last = -1; clear();
+      if (!installed && map()) { installed = true; map().addEventListener('mousemove', move); map().addEventListener('mouseleave', clear); }
+    },
+  };
+})();
 
 function renderCircuitRes(res, ref) {
   const msg = document.getElementById('msg-circuit-res'), body = document.getElementById('body-circuit-res');
@@ -181,7 +214,8 @@ function renderCircuitRes(res, ref) {
     figuresTable(['lap_speed_min_kmh', 'lap_speed_max_kmh', 'lap_speed_avg_kmh', 'lap_max_lateral_g', 'lap_max_braking_g'], kf, rk) +
     (rc && !same ? '<p class="small muted">The reference is on a different circuit: it is not compared here.</p>' : '');
   const m = mapValues(c, document.getElementById('map-color').value);
-  drawMap(document.getElementById('map-res'), c.x_m, c.y_m, { values: m.v, vmin: m.vmin, vmax: m.vmax, unit: m.unit, digits: m.digits, colorFn: m.fn, swatches: m.swatches, zero: m.zero, start: 0, dir: 1 });
+  const pick = drawMap(document.getElementById('map-res'), c.x_m, c.y_m, { values: m.v, vmin: m.vmin, vmax: m.vmax, unit: m.unit, digits: m.digits, colorFn: m.fn, swatches: m.swatches, zero: m.zero, start: 0, dir: 1 });
+  mapHover.set(pick, c.position_m, m);
   const nCh = 5;
   document.getElementById('circ-right').style.setProperty('--n', nCh);
   chart('ch-lap-speed', alignAlong(lapSpeedChart(c, same ? rc : null), c));
