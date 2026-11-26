@@ -8,6 +8,7 @@ from scipy.optimize import brentq
 from conftest import build
 from vdcalc.circuit import build_track, load_track
 from vdcalc.lap import solve_lap
+from vdcalc.powertrain import rev_limit, rpm_from_speed
 from vdcalc.straightline import accelerate, brake
 
 EXAMPLE = Path(__file__).parent.parent / "data" / "circuits" / "example_circuit.csv"
@@ -189,6 +190,43 @@ def test_the_secant_gives_the_same_lap_as_the_bisection(car, env):
         slow = solve_lap(car, env, track, backward_method="bisection")
         assert np.max(np.abs(fast.speed - slow.speed)) < 1e-6
         assert fast.lap_time == pytest.approx(slow.lap_time, abs=1e-6)
+
+
+def _car_with_falling_torque(car, falloff):
+    """The example car whose torque falls above 4500 rpm (to (1 - 0.55 * falloff) of its value at the last point)."""
+    rpm = np.array(car.powertrain.torque_curve.rpm)
+    torque = np.array(car.powertrain.torque_curve.torque_nm)
+    factor = np.where(rpm > 4500.0, 1.0 - 0.55 * falloff * (rpm - 4500.0) / (rpm.max() - 4500.0), 1.0)
+    return build({"powertrain.torque_curve": {"rpm": rpm.tolist(), "torque_nm": (torque * factor).tolist()}})
+
+
+@pytest.mark.parametrize("falloff", [0.0, 0.6, 1.0])
+def test_shifting_early_never_makes_the_lap_slower(car, env, falloff):
+    t = build_track(*stadium_points(1500.0, 60.0), ds=2.0)
+    c = _car_with_falling_torque(car, falloff)
+    early = solve_lap(c, env, t).lap_time
+    at_the_limit = solve_lap(c, env, t, early_shifts=False).lap_time
+    assert early <= at_the_limit + 1e-6
+
+
+def test_a_car_whose_torque_falls_shifts_before_the_rev_limit_and_laps_faster(car, env):
+    t = build_track(*stadium_points(1500.0, 60.0), ds=2.0)
+    c = _car_with_falling_torque(car, 1.0)
+    early = solve_lap(c, env, t)
+    at_the_limit = solve_lap(c, env, t, early_shifts=False)
+    assert early.lap_time < at_the_limit.lap_time - 0.05
+    ups = [k for k in range(len(early.gear) - 1) if early.gear[k] >= 0 and early.gear[k + 1] > early.gear[k]]
+    assert ups
+    rpm = [float(rpm_from_speed(c, early.speed[k], int(early.gear[k]))) for k in ups]
+    assert min(rpm) < 0.93 * rev_limit(c)                                   # some upshift happens well before the rev limit
+
+
+def test_when_the_best_gear_only_changes_at_the_rev_limit_both_rules_agree(car, env):
+    t = build_track(*stadium_points(1500.0, 60.0), ds=2.0)
+    a = solve_lap(car, env, t)
+    b = solve_lap(car, env, t, early_shifts=False)
+    assert a.lap_time == pytest.approx(b.lap_time, abs=1e-9)
+    assert np.array_equal(a.gear, b.gear)
 
 
 def test_the_lap_time_error_falls_fast_with_the_step(car, env):

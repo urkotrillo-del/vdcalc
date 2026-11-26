@@ -7,8 +7,9 @@ Steps:
   3. Forward pass: the fastest way of driving to the cap, accelerating at the limit of the car (engine with gears,
      rev limit and shift time; tyres with traction limit and friction ellipse). It works one ACCELERATION SEGMENT at a
      time: where the cap rises, the car starts the segment in the gear that accelerates best or in one of the next
-     ones, upshifts at the rev limit (constant speed during the shift) and the start gear that gives the least time at
-     the end of the segment is kept. Where the car is held by the cap (braking, or holding the cornering speed) it is
+     ones and upshifts (constant speed during the shift), either as soon as the next gear accelerates more (where the
+     acceleration curves of two gears cross, as in the straight-line run) or at the rev limit. The start gear and the
+     shift rule that give the least time at the end of the segment are kept. Where the car is held by the cap (braking, or holding the cornering speed) it is
      off the throttle and no gear is shown.
 The profile starts at the slowest point of the circuit, where the speed is the limit by definition, so the lap
 closes on itself.
@@ -30,7 +31,7 @@ from .lateral import corner_speed, lateral_usage, remaining_fraction
 from .limits import acceleration, accelerations, braking_deceleration
 from .loads import Conditions, load_terms
 from .powertrain import rev_limit, total_ratio
-from .straightline import top_speed
+from .straightline import GEAR_HYSTERESIS, top_speed
 
 SPEED_CAP_FACTOR = 1.25     # the speed limit on straights is this multiple of the top speed on the flat
 
@@ -153,7 +154,8 @@ class _Run:
         return _Run(self.v, self.t, self.gear, self.coast, self.next_gear)
 
 
-def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_window=START_GEAR_WINDOW):
+def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_window=START_GEAR_WINDOW,
+             early_shifts=True):
     """Fastest way to drive the circuit accelerating at the limit of the car, choosing the gear in each acceleration.
 
     cap: the speed the car cannot exceed at each point (the cornering limit and what it can brake from).
@@ -162,11 +164,14 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
 
     The car follows the cap where the cap does not rise. Where it rises, an acceleration segment starts, up to the next
     minimum of the cap. For every start gear tried, the car drives the segment at the limit of the tyres and the engine:
-      - upshifts when the engine reaches the rev limit (in the middle of a step if that is where it happens),
+      - upshifts when the engine reaches the rev limit (in the middle of a step if that is where it happens), or, with the
+        early rule, as soon as the next gear accelerates more than the current one (the curves of the two gears cross),
       - a shift takes the shift time at constant speed (no drive force),
       - its speed never exceeds the cap (it follows it when it reaches it).
-    The start gear with the least time at the end of the segment is kept. Downshifts are not needed: a gear that cannot
-    be used at the start speed is not tried, and the cap only ever makes the car slower than its limit.
+    The start gear and shift rule with the least time at the end of the segment are kept. The early rule is only tried
+    again as the plain rev-limit rule when it actually shifted before the rev limit (otherwise both are the same
+    drive). Downshifts are not needed: a gear that cannot be used at the start speed is not tried, and the cap only ever
+    makes the car slower than its limit.
     Each step uses the average of the acceleration at its start and at its end (predict, then correct).
     """
     n = len(cap)
@@ -188,8 +193,17 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
             a = -float(t.drag + t.rolling + t.grade) / mass
         return a
 
-    def advance(run, k):
-        """Drive the step k -> k+1 from the state `run`; returns the new state."""
+    def accel_pair(v, g, k, cond):
+        """Acceleration in gear g and in the next gear at the same speed (one call: they share the loads)."""
+        usage = min(float(lateral_usage(vehicle, env, v, k_int[k], bank_int[k], cond)), 1.0)
+        a_all = np.asarray(accelerations(vehicle, env, v, cond, False, float(remaining_fraction(usage)))[0], dtype=float).reshape(n_gears)
+        return float(a_all[g]), float(a_all[g + 1])
+
+    def advance(run, k, early, fired):
+        """Drive the step k -> k+1 from the state `run`; returns the new state.
+
+        early: upshift as soon as the next gear accelerates more (see GEAR_HYSTERESIS); fired[0] is set when it did.
+        """
         v, t, g, coast, g_after = run.v, run.t, run.gear, run.coast, run.next_gear
         cap_next = cap[k + 1]
         cond = Conditions(slope_int[k], kv_int[k])
@@ -211,7 +225,10 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
                 else:
                     g = g_after
                 continue
-            a0 = accel(v, g, k, cond)
+            if early and g < n_gears - 1:
+                a0, a_up = accel_pair(v, g, k, cond)
+            else:
+                a0, a_up = accel(v, g, k, cond), math.nan
             if g < n_gears - 1 and math.isnan(a0):
                 g_after = g + 1
                 if shift_time > 0.0:
@@ -219,6 +236,15 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
                 else:
                     g = g_after
                 continue
+            if early and g < n_gears - 1:                           # the curves of this gear and the next one cross
+                if not math.isnan(a_up) and a_up > a0 + GEAR_HYSTERESIS:
+                    fired[0] = True
+                    g_after = g + 1
+                    if shift_time > 0.0:
+                        coast = v * shift_time
+                    else:
+                        g = g_after
+                    continue
             v_pred = math.sqrt(max(v * v + 2.0 * a0 * left, 0.0))
             if g < n_gears - 1 and v_pred >= v_cut[g]:              # the rev limit falls inside this step
                 v_c = v_cut[g] * (1.0 - 1e-9)
@@ -280,14 +306,18 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
             starts = [_Run(v0, 0.0, g) for g in tried]
         results = []
         for run in starts:
-            run = run.copy()
-            v_log, g_log, t_log = [run.v], [], [0.0]
-            for k in range(i, end):
-                g_log.append(run.gear)
-                run = advance(run, k)
-                v_log.append(run.v)
-                t_log.append(run.t)
-            results.append((run, v_log, g_log, t_log))
+            for early in ((True, False) if early_shifts else (False,)):
+                fired = [False]
+                car = run.copy()
+                v_log, g_log, t_log = [car.v], [], [0.0]
+                for k in range(i, end):
+                    g_log.append(car.gear)
+                    car = advance(car, k, early, fired)
+                    v_log.append(car.v)
+                    t_log.append(car.t)
+                results.append((car, v_log, g_log, t_log))
+                if early and not fired[0]:                         # it never shifted early: the rev-limit rule is the same drive
+                    break
         if len(results) > 1:                                        # same end point: least time; one that is slower there pays the time to catch up
             v_best = max(r[0].v for r in results)
             a_end = max(accel(v_best, results[0][0].gear, end - 1, Conditions(slope_int[end - 1], kv_int[end - 1])), 0.5)
@@ -308,10 +338,12 @@ def _forward(vehicle, env, cap, k_int, bank_int, slope_int, kv_int, ds, start_wi
     return speed, gear, step_time
 
 
-def solve_lap(vehicle, env, track: Track, backward_method="secant") -> LapResult:
+def solve_lap(vehicle, env, track: Track, backward_method="secant", early_shifts=True) -> LapResult:
     """Speed profile and lap time of the vehicle on the circuit.
 
     backward_method: "secant" (default) or "bisection" (slower, the reference the secant is checked against).
+    early_shifts: also try upshifting before the rev limit, where the next gear accelerates more (default). With False
+    the car only shifts at the rev limit.
     """
     n = len(track.s)
     ds = track.ds
@@ -325,7 +357,7 @@ def solve_lap(vehicle, env, track: Track, backward_method="secant") -> LapResult
     lim = limit[order]
     bwd = _backward(vehicle, env, lim, k_int, bank_int, slope_int, kv_int, ds, backward_method)
     cap_profile = np.minimum(lim, bwd)
-    profile, gears, step_time = _forward(vehicle, env, cap_profile, k_int, bank_int, slope_int, kv_int, ds)
+    profile, gears, step_time = _forward(vehicle, env, cap_profile, k_int, bank_int, slope_int, kv_int, ds, early_shifts=early_shifts)
     profile[-1] = profile[0]
 
     speed = np.empty(n)
